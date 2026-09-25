@@ -1,0 +1,16 @@
+S1 | client=X25519MLKEM768 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S1 | client=X25519:X25519MLKEM768 | Temp Key: X25519 | ClientHellos=1
+S1 | client=*X25519MLKEM768:*X25519 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S1 | client=X25519 | Temp Key: X25519 | ClientHellos=1
+S2 | client=X25519MLKEM768 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S2 | client=X25519:X25519MLKEM768 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=2
+S2 | client=*X25519MLKEM768:*X25519 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S2 | client=X25519 | Temp Key: X25519 | ClientHellos=1
+S3 | client=X25519MLKEM768 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S3 | client=X25519:X25519MLKEM768 | Temp Key: X25519 | ClientHellos=1
+S3 | client=*X25519MLKEM768:*X25519 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S3 | client=X25519 | Temp Key: X25519 | ClientHellos=1
+S1pref | client=X25519MLKEM768 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S1pref | client=X25519:X25519MLKEM768 | Temp Key: X25519 | ClientHellos=1
+S1pref | client=*X25519MLKEM768:*X25519 | Negotiated TLS1.3 group: X25519MLKEM768 | ClientHellos=1
+S1pref | client=X25519 | Temp Key: X25519 | ClientHellos=1

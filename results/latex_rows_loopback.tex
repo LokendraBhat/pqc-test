@@ -1,0 +1,19 @@
+% Table 8 rows, auth=ecdsa: Comparison & t & p_Holm(Welch) & U & p_Holm(M-W) & d & Effect & 95% CI
+X vs. P & 0.02 & 1.000 & 5175 & 1.000 & 0.00 & negligible & [-0.81, 0.83] \\
+X vs. H & -0.44 & 1.000 & 4416 & 0.463 & -0.06 & negligible & [-0.94, 0.60] \\
+X vs. H2 & -0.93 & 1.000 & 4185 & 0.233 & -0.13 & negligible & [-1.28, 0.46] \\
+P vs. H & -0.48 & 1.000 & 4225 & 0.234 & -0.07 & negligible & [-0.93, 0.56] \\
+P vs. H2 & -0.98 & 1.000 & 4024 & 0.103 & -0.14 & negligible & [-1.27, 0.43] \\
+H vs. H2 & -0.59 & 1.000 & 4780 & 1.000 & -0.08 & negligible & [-1.04, 0.56] \\
+% Table 8 rows, auth=mldsa: Comparison & t & p_Holm(Welch) & U & p_Holm(M-W) & d & Effect & 95% CI
+X vs. P & 0.11 & 1.000 & 5014 & 1.000 & 0.02 & negligible & [-0.96, 1.08] \\
+X vs. H & -1.24 & 0.959 & 4301 & 0.483 & -0.17 & negligible & [-1.51, 0.35] \\
+X vs. H2 & 0.13 & 1.000 & 4892 & 1.000 & 0.02 & negligible & [-0.92, 1.06] \\
+P vs. H & -1.34 & 0.959 & 4284 & 0.483 & -0.19 & negligible & [-1.58, 0.30] \\
+P vs. H2 & 0.02 & 1.000 & 4902 & 1.000 & 0.00 & negligible & [-0.99, 1.01] \\
+H vs. H2 & 1.41 & 0.959 & 5547 & 0.727 & 0.20 & negligible & [-0.26, 1.56] \\
+% Auth-cost rows: Group & t & p_Holm(Welch) & U & p_Holm(M-W) & d & Effect & 95% CI
+X25519 & 4.04 & < 0.001 & 7096 & < 0.001 & 0.57 & medium & [0.98, 2.83] \\
+P-256 & 3.97 & < 0.001 & 6967 & < 0.001 & 0.56 & medium & [0.93, 2.78] \\
+X25519MLKEM768 & 5.92 & < 0.001 & 7694 & < 0.001 & 0.84 & large & [1.54, 3.09] \\
+SecP256r1MLKEM768 & 3.01 & 0.003 & 6576 & < 0.001 & 0.43 & small & [0.49, 2.36] \\

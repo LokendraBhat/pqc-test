@@ -1,0 +1,2 @@
+50 packets transmitted, 49 received, 2% packet loss, time 10133ms
+rtt min/avg/max/mdev = 150.654/161.202/207.004/11.856 ms

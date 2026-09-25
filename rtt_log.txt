@@ -1,0 +1,4 @@
+50ms_0.5pct rtt min/avg/max/mdev = 50.955/132.872/475.752/76.022 ms, pipe 2
+50ms_1pct rtt min/avg/max/mdev = 50.328/52.893/67.263/3.734 ms
+150ms_0.5pct rtt min/avg/max/mdev = 150.693/174.963/261.506/19.960 ms, pipe 2
+150ms_1pct rtt min/avg/max/mdev = 150.306/161.850/419.078/48.763 ms, pipe 2

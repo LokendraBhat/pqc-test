@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# preflight_check.sh - verify the benchmark setup BEFORE collecting samples.
+# Nothing here changes the system; it only reads and runs test handshakes.
+#
+# Usage:
+#   HOST=pqc.example.com PORT=443 ./preflight_check.sh            # loopback setup
+#   WAN=1 RTT_MS=50 LOSS_PCT=0.5 ./preflight_check.sh             # also check netem namespaces
+#       (WAN mode: client namespace "cli" with v-cli; server side v-srv in namespace $SRV_NS,
+#        or in the root namespace if SRV_NS= is empty; server address WAN_IP, default 10.9.0.1)
+
+set -u
+HOST=${HOST:-pqc.example.com}; PORT=${PORT:-443}; SNI=${SNI:-$HOST}
+WAN=${WAN:-0}; RTT_MS=${RTT_MS:-50}; LOSS_PCT=${LOSS_PCT:-0.5}
+SRV_NS=${SRV_NS-srv}   # set SRV_NS= (empty) if nginx/v-srv stay in the root namespace
+WAN_IP=${WAN_IP:-10.9.0.1}
+srv_exec(){ if [ -n "$SRV_NS" ]; then ip netns exec "$SRV_NS" "$@"; else "$@"; fi; }
+ALGS=(X25519 P-256 X25519MLKEM768)
+PROVIDER_ARGS=${PROVIDER_ARGS:--provider default}
+
+# Negotiated group. OpenSSL 3.5 prints "Negotiated TLS1.3 group: X" for KEM/hybrid
+# groups, but "Peer Temp Key: X25519, 253 bits" / "Peer Temp Key: ECDH, prime256v1, 256 bits"
+# for classical ECDHE groups. Handle both.
+parse_group() {
+  printf '%s\n' "$1" | awk '
+    /[Nn]egotiated TLS1\.3 group:/ { s=$0; sub(/.*group: */,"",s); split(s,a," "); print a[1]; exit }
+    /(Peer|Server) Temp Key:/      { s=$0; sub(/.*Temp Key: */,"",s); n=split(s,f,/, */);
+                                     if (f[1]=="ECDH") print f[2]; else if (f[1]=="DH") print "DH"; else print f[1]; exit }'
+}
+P=0; W=0; F=0
+pass(){ echo "  [PASS] $*"; P=$((P+1)); }
+warn(){ echo "  [WARN] $*"; W=$((W+1)); }
+fail(){ echo "  [FAIL] $*"; F=$((F+1)); }
+hdr(){ echo; echo "== $* =="; }
+
+# ---------------------------------------------------------------- 1. tools
+hdr "1. Required tools"
+for c in openssl timeout shuf awk sed grep; do
+  command -v $c >/dev/null && pass "$c found" || fail "$c missing"
+done
+command -v nstat >/dev/null && pass "nstat found (retransmission counts enabled)" \
+  || warn "nstat missing (iproute2) - Fail./100 column will be empty"
+ns=$(date +%s%N)
+[[ "$ns" =~ ^[0-9]{19}$ ]] && pass "date gives nanosecond timestamps" \
+  || fail "date +%s%N not supported (got '$ns')"
+
+hdr "2. Python analysis environment"
+if command -v python3 >/dev/null; then
+  for m in numpy scipy pandas matplotlib; do
+    python3 -c "import $m" 2>/dev/null && pass "python module $m" || fail "python module $m missing (pip install $m)"
+  done
+  python3 -c "import scipy; print('     scipy', scipy.__version__)" 2>/dev/null
+else
+  fail "python3 missing"
+fi
+
+# ---------------------------------------------------------------- 3. openssl
+hdr "3. OpenSSL and providers (client side)"
+echo "     $(openssl version -a | head -1)"
+echo "     OPENSSL_CONF=${OPENSSL_CONF:-<unset>}   MODULESDIR=$(openssl version -m | cut -d'"' -f2)"
+if openssl list -providers -provider oqsprovider -provider default 2>/dev/null | grep -qi oqs; then
+  pass "oqsprovider loads"
+else
+  fail "oqsprovider does not load - check module = path in openssl.cnf / OPENSSL_MODULES"
+fi
+if openssl list -kem-algorithms -provider oqsprovider -provider default 2>/dev/null | grep -qi 'mlkem768\|ML-KEM-768'; then
+  pass "ML-KEM-768 KEM available"
+else
+  fail "ML-KEM-768 not listed in kem-algorithms"
+fi
+
+# ---------------------------------------------------------------- 4. handshakes
+hs(){  # $1 group, rest = provider args ; prints "negotiated|bytes_read|bytes_written|rc"
+  local g=$1; shift
+  local out rc
+  out=$(echo Q | timeout 15 openssl s_client -connect "$HOST:$PORT" -servername "$SNI" \
+        -groups "$g" -tls1_3 -no_ign_eof "$@" 2>&1); rc=$?
+  local neg br bw
+  neg=$(parse_group "$out")
+  br=$(printf '%s\n' "$out" | sed -n 's/.*has read \([0-9]*\) bytes and written.*/\1/p' | head -1)
+  bw=$(printf '%s\n' "$out" | sed -n 's/.*and written \([0-9]*\) bytes.*/\1/p' | head -1)
+  echo "${neg:-none}|${br:-?}|${bw:-?}|$rc"
+}
+
+hdr "4. Server reachability and group negotiation ($HOST:$PORT, client providers: $PROVIDER_ARGS)"
+for g in "${ALGS[@]}"; do
+  IFS='|' read -r neg br bw rc <<< "$(hs "$g" $PROVIDER_ARGS)"
+  case "$g:$neg" in
+    X25519:X25519|X25519MLKEM768:X25519MLKEM768|P-256:P-256|P-256:secp256r1|P-256:prime256v1)
+      pass "$g -> negotiated $neg  (read $br B, written $bw B)";;
+    *) fail "$g -> negotiated '$neg' (rc=$rc). Server not offering it, or client fell back";;
+  esac
+done
+
+hdr "5. Negative control (the -groups flag must really restrict the client)"
+IFS='|' read -r neg br bw rc <<< "$(hs ffdhe2048 $PROVIDER_ARGS)"
+if [ "$neg" = "none" ] || [ "$rc" -ne 0 ]; then
+  pass "unconfigured group ffdhe2048 is refused - measurements are group-specific"
+else
+  warn "ffdhe2048 negotiated as '$neg' - server accepts more groups than listed in ssl_ecdh_curve; check nginx config"
+fi
+
+hdr "6. Which component actually provides the hybrid? (affects what your paper claims)"
+IFS='|' read -r neg br bw rc <<< "$(hs X25519MLKEM768 -provider default)"
+if [ "$neg" = "X25519MLKEM768" ]; then
+  warn "X25519MLKEM768 works WITHOUT oqsprovider: OpenSSL $(openssl version | awk '{print $2}') implements it natively."
+  echo "         Your paper attributes the hybrid to liboqs/oqs-provider. Say instead that the"
+  echo "         group is native OpenSSL (>=3.5) on both client and nginx (3.6.2), and state"
+  echo "         which provider was loaded during measurements."
+else
+  pass "X25519MLKEM768 requires oqsprovider on the client (negotiated '$neg' without it)"
+fi
+
+hdr "7. Byte counts consistent with Table 4.3 (1846 read + 1494 written)"
+IFS='|' read -r neg br bw rc <<< "$(hs X25519MLKEM768 -provider oqsprovider -provider default)"
+if [[ "$br" =~ ^[0-9]+$ ]]; then
+  tot=$((br+bw)); echo "     hybrid handshake: $br + $bw = $tot bytes"
+  [ "$tot" -gt 3000 ] && pass "hybrid handshake size looks right (>3 KB)" \
+    || warn "hybrid handshake only $tot bytes - is ML-KEM really in use?"
+else
+  fail "could not parse byte counts from s_client output"
+fi
+
+# ---------------------------------------------------------------- 8. host stability
+hdr "7b. Server certificate type"
+cert=$(echo Q | timeout 15 openssl s_client -connect "$HOST:$PORT" -servername "$SNI" -tls1_3 $PROVIDER_ARGS 2>/dev/null \
+       | openssl x509 -noout -text 2>/dev/null | sed -n 's/.*Public Key Algorithm: *//p' | head -1)
+echo "     leaf certificate key: ${cert:-unknown}"
+case "$cert" in
+  *id-ecPublicKey*) pass "ECDSA certificate - matches the paper (Section 3.4, Table 4.3)";;
+  *ML-DSA*|*mldsa*|*MLDSA*) warn "ML-DSA certificate - the paper describes ECDSA. Either switch back, or report this as a separate PQ-authentication experiment";;
+  *) warn "could not determine certificate type";;
+esac
+
+hdr "8. Host conditions (noise sources for latency)"
+echo "     CPUs: $(nproc)   load average: $(cut -d' ' -f1-3 /proc/loadavg)"
+load1=$(cut -d' ' -f1 /proc/loadavg)
+awk -v l="$load1" -v c="$(nproc)" 'BEGIN{exit !(l < 0.5*c)}' \
+  && pass "system load is low" || warn "load average is high - stop other workloads before measuring"
+gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo n/a)
+echo "     CPU governor: $gov"
+[ "$gov" = "performance" ] || [ "$gov" = "n/a" ] && pass "CPU governor ok ($gov)" \
+  || warn "CPU governor is '$gov' - 'performance' reduces frequency-scaling noise (record whichever you use)"
+lomtu=$(cat /sys/class/net/lo/mtu 2>/dev/null)
+echo "     loopback MTU: $lomtu (the 3.3 KB handshake is NOT split into packets on lo - expected for loopback runs)"
+
+# ---------------------------------------------------------------- 9. WAN namespaces
+if [ "$WAN" = "1" ]; then
+  hdr "9. WAN emulation (namespaces srv/cli, target RTT ${RTT_MS} ms, loss ${LOSS_PCT}%)"
+  for n in $SRV_NS cli; do
+    ip netns list 2>/dev/null | grep -qw "$n" && pass "namespace $n exists" || fail "namespace $n missing"
+  done
+  for dev in v-srv v-cli; do
+    if [ "$dev" = v-cli ]; then run(){ ip netns exec cli "$@"; }; else run(){ srv_exec "$@"; }; fi
+    mtu=$(run ip link show "$dev" 2>/dev/null | sed -n 's/.*mtu \([0-9]*\).*/\1/p')
+    [ "$mtu" = "1500" ] && pass "$dev MTU 1500" || fail "$dev MTU is '${mtu:-?}', expected 1500"
+    set -- x "$dev"
+    q=$(run tc qdisc show dev "$dev" 2>/dev/null)
+    echo "     $2 qdisc: ${q:-none}"
+    echo "$q" | grep -q netem && pass "netem active on $2" || fail "no netem qdisc on $2"
+  done
+  pstat=$(ip netns exec cli ping -c 30 -i 0.2 -q $WAN_IP 2>/dev/null | awk -F'[ /]+' '/rtt|round-trip/{print $7, $8, $9, $10}')
+  if [ -n "$pstat" ]; then
+    read -r rmin ravg rmax rmdev <<< "$pstat"
+    echo "     RTT min/avg/max/mdev: $rmin / $ravg / $rmax / $rmdev ms (target ${RTT_MS})"
+    awk -v r="$rmin" -v t="$RTT_MS" 'BEGIN{exit !(r > 0.95*t && r < 1.15*t)}' \
+      && pass "minimum RTT matches target (netem delay configured correctly)" \
+      || fail "minimum RTT off target - check delay values on both interfaces"
+    awk -v a="$ravg" -v m="$rmin" 'BEGIN{exit !(a-m < 5)}' \
+      && pass "RTT jitter small (avg - min < 5 ms)" \
+      || warn "avg RTT is $(awk -v a="$ravg" -v m="$rmin" 'BEGIN{printf "%.1f",a-m}') ms above min - scheduling jitter (VM?) - report measured RTT in the paper"
+  else
+    fail "cannot ping $WAN_IP from namespace cli"
+  fi
+  lossp=$(ip netns exec cli ping -c 400 -i 0.01 -q $WAN_IP 2>/dev/null | sed -n 's/.* \([0-9.]*\)% packet loss.*/\1/p')
+  echo "     ping loss over 400 packets: ${lossp:-?}% (round trip, so roughly 2x the per-link rate if set on both ends)"
+  if ip netns exec cli timeout 5 bash -c "</dev/tcp/$WAN_IP/$PORT" 2>/dev/null; then
+    pass "TCP port $PORT on $WAN_IP reachable from cli"
+    out=$(ip netns exec cli bash -c "echo Q | timeout 15 openssl s_client -connect $WAN_IP:$PORT -servername $SNI \
+          -groups X25519MLKEM768 -tls1_3 $PROVIDER_ARGS 2>&1")
+    [ "$(parse_group "$out")" = "X25519MLKEM768" ] && pass "hybrid handshake works across the emulated link" \
+      || { fail "TCP connects but TLS handshake fails across the link. Last lines:"; printf '%s\n' "$out" | tail -5 | sed 's/^/         /'; }
+  else
+    fail "TCP port $PORT on $WAN_IP NOT reachable from cli (ping works, so likely firewall: see firewall-cmd --get-active-zones)"
+  fi
+fi
+
+# ---------------------------------------------------------------- summary
+echo; echo "================ SUMMARY: $P pass, $W warn, $F fail ================"
+if [ $F -eq 0 ]; then
+  echo "Setup OK. Next, a dry run:"
+  echo "  N=3 WARMUP=1 OUT=dryrun.csv ./collect_samples.sh && python3 analyze_stats.py dryrun.csv --outdir dryrun"
+else
+  echo "Fix the FAIL items before collecting data."
+fi
+exit $F

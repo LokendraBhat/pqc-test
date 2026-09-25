@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# collect_samples.sh — collect raw TLS 1.3 handshake latencies for
+# X25519, P-256 and X25519MLKEM768, one row per handshake, into a CSV.
+#
+# Design choices (write these into your Methodology section):
+#   * Runs are INTERLEAVED in random order, so drift over time (CPU frequency,
+#     caches, background load) affects all three algorithms equally.
+#   * WARMUP handshakes per algorithm are run first and flagged phase=warmup;
+#     the analysis script excludes them.
+#   * Every handshake is checked: the negotiated group is recorded, and a run
+#     only counts as ok=1 if TLSv1.3 was negotiated with the requested group.
+#   * Timing wraps the whole openssl s_client process, so it includes process
+#     start-up and provider loading, not only the cryptography.
+#
+# Usage:
+#   HOST=pqc.example.com PORT=443 N=100 PROFILE=loopback ./collect_samples.sh
+#   # WAN run, from inside the client namespace:
+#   ip netns exec cli env HOST=10.9.0.1 PROFILE=50ms_0.5pct ./collect_samples.sh
+#
+# Output is appended, so run once per profile into the same CSV.
+
+set -u
+HOST=${HOST:-pqc.example.com}
+PORT=${PORT:-443}
+SNI=${SNI:-$HOST}
+N=${N:-100}                 # measured handshakes per algorithm
+WARMUP=${WARMUP:-10}        # discarded warm-up handshakes per algorithm
+PROFILE=${PROFILE:-loopback}
+OUT=${OUT:-latency_raw.csv}
+TIMEOUT=${TIMEOUT:-15}      # seconds; a hung handshake counts as a failure
+ALGS=(X25519 P-256 X25519MLKEM768)
+# Providers used by the CLIENT. Default = native OpenSSL (>=3.5 implements X25519MLKEM768).
+# To measure the oqs-provider implementation instead: PROVIDER_ARGS="-provider oqsprovider -provider default"
+PROVIDER_ARGS=${PROVIDER_ARGS:--provider default}
+
+# Negotiated group. OpenSSL 3.5 prints "Negotiated TLS1.3 group: X" for KEM/hybrid
+# groups, but "Peer Temp Key: X25519, 253 bits" / "Peer Temp Key: ECDH, prime256v1, 256 bits"
+# for classical ECDHE groups. Handle both.
+parse_group() {
+  printf '%s\n' "$1" | awk '
+    /[Nn]egotiated TLS1\.3 group:/ { s=$0; sub(/.*group: */,"",s); split(s,a," "); print a[1]; exit }
+    /(Peer|Server) Temp Key:/      { s=$0; sub(/.*Temp Key: */,"",s); n=split(s,f,/, */);
+                                     if (f[1]=="ECDH") print f[2]; else if (f[1]=="DH") print "DH"; else print f[1]; exit }'
+}
+
+command -v openssl >/dev/null || { echo "openssl not found" >&2; exit 1; }
+HAVE_NSTAT=0; command -v nstat >/dev/null && HAVE_NSTAT=1
+
+[ -f "$OUT" ] || echo "run_id,timestamp,profile,phase,group,latency_ms,ok,negotiated,bytes_read,bytes_written,client_retrans,providers" > "$OUT"
+
+handshake() {   # $1=group $2=phase $3=run_id
+  local g=$1 phase=$2 id=$3 t0 t1 out rc ms neg br bw ok retx=""
+  [ $HAVE_NSTAT -eq 1 ] && nstat -n >/dev/null 2>&1        # reset retrans counter
+  t0=$(date +%s%N)
+  out=$(echo Q | timeout "$TIMEOUT" openssl s_client \
+        -connect "$HOST:$PORT" -servername "$SNI" \
+        -groups "$g" -tls1_3 -no_ign_eof $PROVIDER_ARGS 2>&1)
+  rc=$?
+  t1=$(date +%s%N)
+  ms=$(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f",(b-a)/1e6}')
+  neg=$(parse_group "$out")
+  br=$(printf '%s\n' "$out" | sed -n 's/.*has read \([0-9]*\) bytes and written \([0-9]*\) bytes.*/\1/p' | head -1)
+  bw=$(printf '%s\n' "$out" | sed -n 's/.*has read \([0-9]*\) bytes and written \([0-9]*\) bytes.*/\2/p' | head -1)
+  [ $HAVE_NSTAT -eq 1 ] && retx=$(nstat -z TcpRetransSegs 2>/dev/null | awk '/TcpRetransSegs/{print $2}')
+  ok=0
+  if [ $rc -eq 0 ] && printf '%s\n' "$out" | grep -q "TLSv1.3" && [ -n "$neg" ]; then
+    case "$g:$neg" in                       # P-256 may be reported as secp256r1/prime256v1
+      X25519:X25519|X25519MLKEM768:X25519MLKEM768) ok=1 ;;
+      P-256:P-256|P-256:secp256r1|P-256:prime256v1) ok=1 ;;
+    esac
+  fi
+  echo "$id,$(date -Iseconds),$PROFILE,$phase,$g,$ms,$ok,${neg:-none},${br:-},${bw:-},${retx:-},${PROVIDER_ARGS// /_}" >> "$OUT"
+}
+
+# 1) warm-up (not analysed)
+id=0
+for g in "${ALGS[@]}"; do
+  for ((i=0;i<WARMUP;i++)); do id=$((id+1)); handshake "$g" warmup "$PROFILE-w$id"; done
+done
+
+# 2) measured runs, randomly interleaved
+mapfile -t ORDER < <(for g in "${ALGS[@]}"; do for ((i=0;i<N;i++)); do echo "$g"; done; done | shuf)
+total=${#ORDER[@]}; k=0
+for g in "${ORDER[@]}"; do
+  k=$((k+1)); handshake "$g" measure "$PROFILE-$k"
+  printf '\r[%s] %d/%d' "$PROFILE" "$k" "$total" >&2
+done
+echo >&2
+echo "Done. Rows appended to $OUT" >&2
+awk -F, -v p="$PROFILE" '$3==p && $4=="measure"{n[$5]++; if($7==1) ok[$5]++}
+  END{for(g in n) printf "  %-16s ok %d / %d\n", g, ok[g], n[g]}' "$OUT" >&2
