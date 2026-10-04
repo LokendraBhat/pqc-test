@@ -1,1 +1,34 @@
+# On the VPS, as root
+dnf -y update && dnf -y install firewalld tcpdump ethtool gcc make perl pcre2-devel zlib-devel wget tar
+systemctl enable --now firewalld
+
+# Find YOUR client's public IP (run this on your client VM):
+curl -s https://ifconfig.me
+
+# On the VPS: allow SSH + test ports ONLY from your client IP
+MYIP=<your-client-public-ip>
+firewall-cmd --permanent --remove-service=ssh
+firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$MYIP/32 port port=22 protocol=tcp accept"
+for p in 443 8443 9443 4443 5443; do
+  firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$MYIP/32 port port=$p protocol=tcp accept"
+done
+firewall-cmd --reload
+
+
+## Build nginx with OpenSSL 3.5 (the same way as your VM)
+cd /usr/local/src
+wget https://www.openssl.org/source/openssl-3.5.5.tar.gz      # use the version you used on the VM
+wget https://nginx.org/download/nginx-1.30.4.tar.gz
+tar xf openssl-3.5.5.tar.gz && tar xf nginx-1.30.4.tar.gz
+cd nginx-1.30.4
+./configure --prefix=/etc/nginx --sbin-path=/usr/sbin/nginx \
+  --conf-path=/etc/nginx/nginx.conf --with-http_ssl_module --with-http_v2_module \
+  --with-openssl=/usr/local/src/openssl-3.5.5
+make -j"$(nproc)" && make install
+nginx -V 2>&1 | grep -i openssl          # confirm "built with OpenSSL 3.5.x"
+
+
+## Create a fresh test PKI on the server
+DIR=/root/pqc-bench-ca ./generate_certs.sh            # ECDSA + ML-DSA-65 chains
+# then the ML-DSA-44 chain: same commands as in your thesis E4 steps
 
